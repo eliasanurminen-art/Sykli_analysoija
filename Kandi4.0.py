@@ -33,6 +33,7 @@ Q_features-matriisin sarakkeet (luku 3.3):
 
 from __future__ import annotations
 
+import time
 from collections import deque
 
 import numpy as np
@@ -51,6 +52,7 @@ P_JUURI = 1.6e6               # Pa, 0-solmun paine (painekorkeuksien laskentaan)
 XI_PAIKALLIS = 1.5            # paikallishäviökerroin (tasoristeys, luku 2.1)
 TOL = 1e-3                    # m, max |F_k| < TOL kaikissa sykleissä
 MAX_ITER = 50
+VERTAILULINKIT = [1, 3, 5, 7]  # linkit, joiden tulokset tulostetaan aina (samat kuin EPyT_mallissa)
 MAX_PUOLITUKSET = 10          # lambda > 10 -> iteraatio ei onnistu
 
 # Sarakeindeksit Q_features / edge_features -matriisissa
@@ -225,8 +227,17 @@ def Etsi_syklin_linkit(edges: np.ndarray, verkko: dict) -> dict:
 
         print(f"  Sykli {j}: SML {s} = ({a}->{b}), yhteinen solmu {yhteinen}, "
               f"{len(jarjestys)} linkkiä")
-        print(f"    linkit (etumerkki): "
-              + ", ".join(f"{e}({'+' if C[e, j] > 0 else '-'})" for e in jarjestys))
+        # Tulostetaan linkin indeksi, sen solmut (u->v) ja etumerkki C:ssä
+        print("    linkki: (u->v) etumerkki")
+        for e in jarjestys:
+            print(f"      {e:4d}: ({edges[e, 0]}->{edges[e, 1]}) {'+' if C[e, j] > 0 else '-'}")
+        # Kulkureitti solmuina syklin nimellissuunnassa
+        reitti_solmut = [a, b]
+        for e in jarjestys[1:]:
+            u_e, v_e = edges[e]
+            reitti_solmut.append(u_e if reitti_solmut[-1] == v_e else v_e)
+        print("    kulkureitti: " + " -> ".join(str(x) for x in reitti_solmut))
+        assert reitti_solmut[0] == reitti_solmut[-1], "Sykli ei sulkeudu!"
 
     return {
         "num_cycles": k,
@@ -397,6 +408,38 @@ def Laske_painekorkeudet(edges: np.ndarray, h: np.ndarray, verkko: dict,
 # ============================================================================
 # PÄÄOHJELMA
 # ============================================================================
+def Tulosta_linkit(edges: np.ndarray, edge_features: np.ndarray, Q: np.ndarray, h: np.ndarray,
+                   H: np.ndarray, sml: np.ndarray, linkit=VERTAILULINKIT):
+    """Tulostaa SML:ien ja vertailulinkkien (oletuksena 1, 3, 5, 7) tulokset samassa muodossa
+    kuin EPyT_malli, jotta tuloksia voi verrata suoraan. Linkin indeksi on sen rivi
+    edges-taulukossa, joten indeksit ovat samat molemmissa ohjelmissa."""
+    A = edge_features[:, C_A]
+    print(f"\n{'linkki':>6} {'u->v':>9} {'Q [m3/s]':>13} {'v [m/s]':>9} {'h [m]':>11} {'H_u [m]':>10} {'H_v [m]':>10}")
+    for i in list(sml) + [x for x in linkit if x not in set(sml)]:
+        if i >= len(edges):
+            print(f"{i:6d}   (verkossa ei ole näin montaa linkkiä)")
+            continue
+        u, v = edges[i]
+        tunniste = "  <- SML" if i in set(sml) else ""
+        print(f"{i:6d} {f'{u}->{v}':>9} {Q[i]:13.6e} {Q[i] / A[i]:9.4f} {h[i]:11.5f} {H[u]:10.3f} {H[v]:10.3f}{tunniste}")
+
+
+def Tulosta_alkuarvaus(edges: np.ndarray, edge_features: np.ndarray, Q0: np.ndarray, h0: np.ndarray,
+                       sml: np.ndarray, linkit=VERTAILULINKIT):
+    """Tulostaa SML:ien ja vertailulinkkien alkuarvauksen (luku 2.6): tilavuusvirta,
+    virtausnopeus ja painehäviö ennen Newton-iteraatiota."""
+    A = edge_features[:, C_A]
+    print(f"\nAlkuarvaus, SML:t ja vertailulinkit " + ", ".join(str(x) for x in linkit) + ":")
+    print(f"{'linkki':>6} {'u->v':>9} {'Q0 [m3/s]':>13} {'v0 [m/s]':>9} {'h0 [m]':>11}")
+    for i in list(sml) + [x for x in linkit if x not in set(sml)]:
+        if i >= len(edges):
+            print(f"{i:6d}   (verkossa ei ole näin montaa linkkiä)")
+            continue
+        u, v = edges[i]
+        tunniste = "  <- SML" if i in set(sml) else ""
+        print(f"{i:6d} {f'{u}->{v}':>9} {Q0[i]:13.6e} {Q0[i] / A[i]:9.4f} {h0[i]:11.5f}{tunniste}")
+
+
 def main():
     rho, nu = veden_ominaisuudet()
 
@@ -406,6 +449,7 @@ def main():
     l = len(edges)
     print(f"Solmuja m = {n_solmut}, linkkejä l = {l}, kuluttajia = {len(kuluttajat)}")
     print(f"Vesi {T_VESI - 273.15:.0f} °C: rho = {rho:.1f} kg/m3, nu = {nu:.3e} m2/s")
+    t_alku = time.perf_counter()          # laskenta-ajan mittaus alkaa (tiedoston luku ei mukana)
 
     # ---------------------------------------------------------- Cycle_Finder
     otsikko("2) CYCLE_FINDER – tasot ja SML:t")
@@ -436,6 +480,7 @@ def main():
           f"Re: {apu['Re'].min():.0f}–{apu['Re'].max():.0f}")
     for j, s in enumerate(verkko["sml"]):
         print(f"  Sykli {j}: SML {s} Q0 = {Q[s]:.6f} m3/s, F0 = {F[j]:.4f} m")
+    Tulosta_alkuarvaus(edges, edge_features, Q, h, verkko["sml"])
 
     # ------------------------------------------------------------- iteraatio
     otsikko("5) NEWTON-ITERAATIO (vaimennettu)")
@@ -466,21 +511,21 @@ def main():
     H0 = P_JUURI / (rho * G)
     H = Laske_painekorkeudet(edges, h, verkko, n_solmut, H0)
     dE = h + H[edges[:, 1]] - H[edges[:, 0]]     # linkin energiayhtälön virhe
+    laskenta_aika = time.perf_counter() - t_alku  # laskenta-ajan mittaus päättyy
     print(f"H(0-solmu) = {H0:.2f} m,  pienin H = {np.nanmin(H):.2f} m (solmu {np.nanargmin(H)})")
     print(f"Energiayhtälön virhe dE: puun linkeissä max {np.max(np.abs(dE[verkko['puun_linkit']])):.1e} m, "
           f"SML:issä " + ", ".join(f"{dE[s]:.2e}" for s in verkko["sml"]) + " m (= F)")
 
     Q_features = np.column_stack((edge_features, Q, dE, h))
 
-    for s in verkko["sml"]:
-        u, v = edges[s]
-        print(f"SML {s}: H[{u}] = {H[u]:.3f} m, H[{v}] = {H[v]:.3f} m, h = {h[s]:.4f} m, "
-              f"Q = {Q[s]:.6f} m3/s")
+    print("SML:t ja vertailulinkit " + ", ".join(str(x) for x in VERTAILULINKIT) + ":")
+    Tulosta_linkit(edges, edge_features, Q, h, H, verkko["sml"])
 
     nayte = min(30, l - 1)
     print(f"\nLinkki {nayte}: [L, D, A, eps, u, v, Q, dE, h_loss] =")
     print("  ", np.array2string(Q_features[nayte], precision=5, suppress_small=False))
 
+    print(f"\nLaskenta-aika (Cycle_Finder -> painekorkeudet): {laskenta_aika * 1000:.1f} ms")
     return Q_features, H, cycle_db
 
 
