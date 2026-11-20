@@ -45,14 +45,13 @@ from fluids.friction import friction_factor
 # ----------------------------------------------------------------------------
 TIEDOSTO = "network_data.npz"
 JUURI = 0                     # 0-solmu (syöttö)
-Q_KULUTUS = 0.0006            # m^3/s, yhden kuluttajan kulutus (luku 2.6)
+Q_KULUTUS = 0.0009            # m^3/s, yhden kuluttajan kulutus (luku 2.6)
 G = 9.81                      # m/s^2
 T_VESI = 80.0 + 273.15        # K, vakiolämpötila
 P_JUURI = 1.6e6               # Pa, 0-solmun paine (painekorkeuksien laskentaan)
 XI_PAIKALLIS = 1.5            # paikallishäviökerroin (tasoristeys, luku 2.1)
 TOL = 1e-3                    # m, max |F_k| < TOL kaikissa sykleissä
 MAX_ITER = 50
-VERTAILULINKIT = [1, 3, 5, 7]  # linkit, joiden tulokset tulostetaan aina (samat kuin EPyT_mallissa)
 MAX_PUOLITUKSET = 10          # lambda > 10 -> iteraatio ei onnistu
 
 # Sarakeindeksit Q_features / edge_features -matriisissa
@@ -239,9 +238,14 @@ def Etsi_syklin_linkit(edges: np.ndarray, verkko: dict) -> dict:
         print("    kulkureitti: " + " -> ".join(str(x) for x in reitti_solmut))
         assert reitti_solmut[0] == reitti_solmut[-1], "Sykli ei sulkeudu!"
 
+    # sum_c (kaava 2.3.x): C:n rivien itseisarvojen summa = kuinka moneen sykliin linkki kuuluu.
+    # 0 = linkki ei kuulu sykliin, 1 = yhteen sykliin, >= 2 = useaan sykliin (jaettu linkki).
+    sum_c = np.abs(C).sum(axis=1).astype(int)
+
     return {
         "num_cycles": k,
         "cycles": syklit,
+        "sum_c": sum_c,
         "cycle_lengths": np.array([len(c) for c in syklit], dtype=int),
         "defining_edges": edges[sml_lista] if k else np.empty((0, 2), dtype=int),
         "C": C,
@@ -361,6 +365,14 @@ def Newton_Iteration(C: np.ndarray, h: np.ndarray, dh: np.ndarray):
         (C^T diag(h') C) dQ_sykli = F
     Yhdellä syklillä tämä on täsmälleen kaava 2.4.11:
         dQ = F / sum(h' |C|).
+
+    Useaan sykliin kuuluvat linkit (sum_c >= 2): linkin korjaus on kaikkien sen
+    syklien korjausten summa, dQ_linkki = C dQ_sykli. Summaa EI jaeta sum_c:llä:
+      * jokainen syklikorjaus on suljettu kiertovirta, joten summa säilyttää
+        massataseen kaikissa solmuissa; jakaminen rivikohtaisesti rikkoisi sen.
+      * jaettujen linkkien vaikutus syklien välillä on jo mukana matriisin J
+        ei-diagonaalisissa alkioissa (J_kj = sum_l h'_l C_lk C_lj), joten sama
+        muutos ei tule huomioiduksi kahdesti.
     Palauttaa syklikorjaukset dQ_sykli (k,) ja linkkikorjaukset C dQ_sykli (l,).
     """
     F = Syklien_residuaali(C, h)
@@ -409,35 +421,26 @@ def Laske_painekorkeudet(edges: np.ndarray, h: np.ndarray, verkko: dict,
 # PÄÄOHJELMA
 # ============================================================================
 def Tulosta_linkit(edges: np.ndarray, edge_features: np.ndarray, Q: np.ndarray, h: np.ndarray,
-                   H: np.ndarray, sml: np.ndarray, linkit=VERTAILULINKIT):
-    """Tulostaa SML:ien ja vertailulinkkien (oletuksena 1, 3, 5, 7) tulokset samassa muodossa
-    kuin EPyT_malli, jotta tuloksia voi verrata suoraan. Linkin indeksi on sen rivi
-    edges-taulukossa, joten indeksit ovat samat molemmissa ohjelmissa."""
+                   H: np.ndarray, sml: np.ndarray):
+    """Tulostaa SML:ien lopputulokset samassa muodossa kuin EPyT_malli,
+    jotta tuloksia voi verrata suoraan."""
     A = edge_features[:, C_A]
     print(f"\n{'linkki':>6} {'u->v':>9} {'Q [m3/s]':>13} {'v [m/s]':>9} {'h [m]':>11} {'H_u [m]':>10} {'H_v [m]':>10}")
-    for i in list(sml) + [x for x in linkit if x not in set(sml)]:
-        if i >= len(edges):
-            print(f"{i:6d}   (verkossa ei ole näin montaa linkkiä)")
-            continue
+    for i in sml:
         u, v = edges[i]
-        tunniste = "  <- SML" if i in set(sml) else ""
-        print(f"{i:6d} {f'{u}->{v}':>9} {Q[i]:13.6e} {Q[i] / A[i]:9.4f} {h[i]:11.5f} {H[u]:10.3f} {H[v]:10.3f}{tunniste}")
+        print(f"{i:6d} {f'{u}->{v}':>9} {Q[i]:13.6e} {Q[i] / A[i]:9.4f} {h[i]:11.5f} {H[u]:10.3f} {H[v]:10.3f}  <- SML")
 
 
 def Tulosta_alkuarvaus(edges: np.ndarray, edge_features: np.ndarray, Q0: np.ndarray, h0: np.ndarray,
-                       sml: np.ndarray, linkit=VERTAILULINKIT):
-    """Tulostaa SML:ien ja vertailulinkkien alkuarvauksen (luku 2.6): tilavuusvirta,
-    virtausnopeus ja painehäviö ennen Newton-iteraatiota."""
+                       sml: np.ndarray):
+    """Tulostaa SML:ien alkuarvauksen (luku 2.6): tilavuusvirta, virtausnopeus
+    ja painehäviö ennen Newton-iteraatiota."""
     A = edge_features[:, C_A]
-    print(f"\nAlkuarvaus, SML:t ja vertailulinkit " + ", ".join(str(x) for x in linkit) + ":")
+    print(f"\nAlkuarvaus, SML:t:")
     print(f"{'linkki':>6} {'u->v':>9} {'Q0 [m3/s]':>13} {'v0 [m/s]':>9} {'h0 [m]':>11}")
-    for i in list(sml) + [x for x in linkit if x not in set(sml)]:
-        if i >= len(edges):
-            print(f"{i:6d}   (verkossa ei ole näin montaa linkkiä)")
-            continue
+    for i in sml:
         u, v = edges[i]
-        tunniste = "  <- SML" if i in set(sml) else ""
-        print(f"{i:6d} {f'{u}->{v}':>9} {Q0[i]:13.6e} {Q0[i] / A[i]:9.4f} {h0[i]:11.5f}{tunniste}")
+        print(f"{i:6d} {f'{u}->{v}':>9} {Q0[i]:13.6e} {Q0[i] / A[i]:9.4f} {h0[i]:11.5f}  <- SML")
 
 
 def main():
@@ -466,6 +469,12 @@ def main():
     cycle_db = Etsi_syklin_linkit(edges, verkko)
     C = cycle_db["C"]
     print(f"C-matriisin koko: {C.shape} (linkit x syklit)")
+    sum_c = cycle_db["sum_c"]
+    print(f"sum_c: {np.sum(sum_c == 0)} linkkiä syklien ulkopuolella, {np.sum(sum_c == 1)} linkkiä yhdessä syklissä, "
+          f"{np.sum(sum_c >= 2)} linkkiä useassa syklissä")
+    for i in np.where(sum_c >= 2)[0]:
+        syklit_i = np.where(C[i] != 0)[0]
+        print(f"    jaettu linkki {i} ({edges[i, 0]}->{edges[i, 1]}): sum_c = {sum_c[i]}, syklit {syklit_i.tolist()}")
 
     # ------------------------------------------------------------ alkuarvaus
     otsikko("4) ALKUARVAUS (lehdistä kohti 0-solmua)")
@@ -518,7 +527,7 @@ def main():
 
     Q_features = np.column_stack((edge_features, Q, dE, h))
 
-    print("SML:t ja vertailulinkit " + ", ".join(str(x) for x in VERTAILULINKIT) + ":")
+    print("SML:t:")
     Tulosta_linkit(edges, edge_features, Q, h, H, verkko["sml"])
 
     nayte = min(30, l - 1)
